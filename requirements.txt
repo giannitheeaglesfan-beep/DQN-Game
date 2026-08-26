@@ -1,0 +1,7 @@
+torch
+gymnasium
+pygame-ce  # pygame's own PyPI wheels don't yet support this Python version; pygame-ce is a drop-in replacement (same `import pygame`)
+numpy
+fastapi
+uvicorn
+pydantic
