@@ -1,10 +1,15 @@
 # DQN Creature Battle
 
 A small project for learning **Deep Q-Networks (DQN)**, a reinforcement learning
-algorithm. A neural network learns to play a simple 1v1 turn-based "creature
-battle" game (think Pokémon-lite: pick a move each turn, exploit type
-matchups, watch out for cooldowns) purely by playing thousands of practice
-battles against a scripted opponent.
+algorithm. A neural network learns to play a simple 1v1 turn-based alien
+battle game (pick a move each turn, exploit power matchups, watch out for
+cooldowns) purely by playing thousands of practice battles against a scripted
+opponent.
+
+Each alien wields one of five cosmic powers — Moon, Sun, Earth, and Meteor
+form a counter cycle (Meteor > Earth > Sun > Moon > Meteor), while Black Hole
+stands outside it: never super effective, never weak to anything, so its
+fights always come down to raw power and accuracy rather than a matchup.
 
 Once trained, you can either play against the AI yourself in a Pygame window,
 or serve the trained model over a small web API.

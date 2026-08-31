@@ -52,10 +52,11 @@ COLOR_LOG_BG = (18, 18, 28)
 COLOR_OVERLAY = (10, 10, 16, 210)
 
 TYPE_COLORS = {
-    0: (150, 150, 150),  # Normal
-    1: (230, 110, 60),   # Fire
-    2: (70, 140, 220),   # Water
-    3: (90, 190, 90),    # Grass
+    0: (190, 190, 220),  # Moon
+    1: (240, 170, 40),   # Sun
+    2: (110, 160, 90),   # Earth
+    3: (210, 90, 50),    # Meteor
+    4: (90, 40, 130),    # Black Hole
 }
 
 MAX_LOG_LINES = 6
@@ -64,7 +65,7 @@ MAX_LOG_LINES = 6
 class BattleGUI:
     def __init__(self) -> None:
         pygame.init()
-        pygame.display.set_caption("Creature Battle: Human vs DQN")
+        pygame.display.set_caption("Alien Battle: Human vs DQN")
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
         self.clock = pygame.time.Clock()
 
@@ -88,7 +89,7 @@ class BattleGUI:
 
     def _new_battle(self) -> None:
         self.env.reset()
-        self.log_lines = ["A wild battle begins!"]
+        self.log_lines = [f"{self.player.name} vs {self.ai.name} — a wild alien battle begins!"]
         self.game_over = False
         self.player_won = False
 
@@ -152,11 +153,14 @@ class BattleGUI:
         return COLOR_HP_RED
 
     def _draw_creature_panel(self, creature: Creature, label: str, x: int, y: int) -> None:
-        width, height = 260, 90
+        width, height = 260, 104
         pygame.draw.rect(self.screen, COLOR_PANEL, (x, y, width, height), border_radius=8)
 
         name_surf = self.font_medium.render(label, True, COLOR_TEXT)
         self.screen.blit(name_surf, (x + 12, y + 8))
+
+        alien_surf = self.font_small.render(creature.name, True, COLOR_TEXT_DIM)
+        self.screen.blit(alien_surf, (x + 12, y + 30))
 
         type_name = TYPE_NAMES[creature.creature_type]
         type_color = TYPE_COLORS[creature.creature_type]
@@ -166,7 +170,7 @@ class BattleGUI:
         self.screen.blit(badge_surf, badge_surf.get_rect(center=badge_rect.center))
 
         hp_pct = creature.hp_pct
-        bar_x, bar_y, bar_w, bar_h = x + 12, y + 44, width - 24, 18
+        bar_x, bar_y, bar_w, bar_h = x + 12, y + 58, width - 24, 18
         pygame.draw.rect(self.screen, COLOR_HP_BG, (bar_x, bar_y, bar_w, bar_h), border_radius=4)
         pygame.draw.rect(
             self.screen,

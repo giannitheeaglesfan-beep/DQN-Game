@@ -1,4 +1,10 @@
-"""Custom Gymnasium environment for a 1v1 turn-based creature battle game.
+"""Custom Gymnasium environment for a 1v1 turn-based alien battle game.
+
+Aliens wield one of five cosmic powers. Moon, Sun, Earth, and Meteor form a
+4-way counter cycle (Meteor > Earth > Sun > Moon > Meteor). Black Hole sits
+outside that cycle entirely: it's never super effective and never weak to
+anything, so a Black Hole alien's fights are always "even" — no free
+matchup advantage either way, just raw power and accuracy.
 
 RL framing:
     - Observation: 8-float vector normalized to [0, 1], always from the
@@ -25,9 +31,18 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-NUM_TYPES = 4
-TYPE_NORMAL, TYPE_FIRE, TYPE_WATER, TYPE_GRASS = range(NUM_TYPES)
-TYPE_NAMES = ["Normal", "Fire", "Water", "Grass"]
+NUM_TYPES = 5
+NUM_ELEMENTAL_TYPES = 4  # Moon/Sun/Earth/Meteor take part in the counter cycle; Black Hole stands apart
+TYPE_MOON, TYPE_SUN, TYPE_EARTH, TYPE_METEOR, TYPE_BLACKHOLE = range(NUM_TYPES)
+TYPE_NAMES = ["Moon", "Sun", "Earth", "Meteor", "Black Hole"]
+
+# Pool of alien names handed out to creatures at creation, independent of
+# their power. Extend this list anytime — battles pick uniformly at random.
+ALIEN_NAMES = [
+    "Astra", "Orion", "Nova", "Cosmo", "Vega",
+    "Xan", "Vaelthor", "Kalthuun", "Orivex", "Zeraphon",
+    "Tala", "Izar", "Euna", "Elazar", "Alistir",
+]
 
 MAX_HP = 100
 NUM_MOVES = 4
@@ -36,28 +51,34 @@ MAX_TURNS = 50  # safety cap so episodes always terminate
 
 # Move `power` values (40/70/55/100) are base stats, not raw damage — at 1:1
 # scale a single 100-power Ultimate could nearly one-shot a 100-HP creature,
-# which ends fights in 1-2 turns instead of a Pokemon-style multi-turn
-# back-and-forth. This scales base power down to an actual HP delta so a
-# typical battle runs for several exchanges per side.
+# which ends fights in 1-2 turns instead of a multi-turn back-and-forth.
+# This scales base power down to an actual HP delta so a typical battle runs
+# for several exchanges per side.
 DAMAGE_SCALE = 0.3
 
-# Type effectiveness: Fire > Grass > Water > Fire (rock-paper-scissors).
-# Normal is neutral against everything and everything is neutral against it.
+# Type effectiveness: a 4-way counter cycle among the elemental powers —
+# Meteor > Earth > Sun > Moon > Meteor (rock-paper-scissors-lizard).
+# Black Hole is neutral against everything and everything is neutral against
+# it — it never gets a super-effective hit and is never caught by one, so a
+# Black Hole alien's matchups are always even; only its base power/accuracy
+# decides the fight.
 _SUPER_EFFECTIVE = {
-    (TYPE_FIRE, TYPE_GRASS): 2.0,
-    (TYPE_GRASS, TYPE_WATER): 2.0,
-    (TYPE_WATER, TYPE_FIRE): 2.0,
+    (TYPE_METEOR, TYPE_EARTH): 2.0,
+    (TYPE_EARTH, TYPE_SUN): 2.0,
+    (TYPE_SUN, TYPE_MOON): 2.0,
+    (TYPE_MOON, TYPE_METEOR): 2.0,
 }
 _NOT_VERY_EFFECTIVE = {
-    (TYPE_GRASS, TYPE_FIRE): 0.5,
-    (TYPE_WATER, TYPE_GRASS): 0.5,
-    (TYPE_FIRE, TYPE_WATER): 0.5,
+    (TYPE_EARTH, TYPE_METEOR): 0.5,
+    (TYPE_SUN, TYPE_EARTH): 0.5,
+    (TYPE_MOON, TYPE_SUN): 0.5,
+    (TYPE_METEOR, TYPE_MOON): 0.5,
 }
 
 
 def type_effectiveness(attack_type: int, defend_type: int) -> float:
     """Return the damage multiplier for attack_type hitting defend_type."""
-    if attack_type == TYPE_NORMAL or defend_type == TYPE_NORMAL:
+    if attack_type == TYPE_BLACKHOLE or defend_type == TYPE_BLACKHOLE:
         return 1.0
     key = (attack_type, defend_type)
     if key in _SUPER_EFFECTIVE:
@@ -77,21 +98,31 @@ class Move:
 
 
 def build_moveset(creature_type: int) -> list[Move]:
-    """Fixed 4-slot move schema shared by every creature of a given type.
+    """Fixed 4-slot move schema shared by every creature of a given power.
 
     Slot semantics are identical across all creatures so action index 0-3
     always means the same *kind* of move to the DQN, regardless of which
-    creature type is on the field:
-        0: Basic Attack   - Normal type, low power, no cooldown, reliable.
-        1: Primary STAB   - matches own type, medium power, 1 cd.
-        2: Coverage       - secondary type, medium power, 1 cd.
-        3: Ultimate       - matches own type, high power, 2 cd, riskier.
+    power is on the field:
+        0: Basic Attack   - Black Hole type (always neutral), no cooldown.
+        1: Primary STAB   - matches own power, medium power, 1 cd.
+        2: Coverage       - secondary power, medium power, 1 cd.
+        3: Ultimate       - matches own power, high power, 2 cd, riskier.
+
+    Black Hole aliens have no elemental cycle to draw a secondary power
+    from, so every one of their moves is Black Hole type — they never land
+    (or take) a super-effective hit; their edge is raw power/accuracy, not
+    a matchup.
     """
-    secondary_type = (creature_type + 1) % NUM_TYPES
-    own_name = TYPE_NAMES[creature_type]
-    secondary_name = TYPE_NAMES[secondary_type]
+    if creature_type == TYPE_BLACKHOLE:
+        secondary_type = TYPE_BLACKHOLE
+        own_name = "Black Hole"
+        secondary_name = "Void"  # flavor only — move_type below is still Black Hole
+    else:
+        secondary_type = (creature_type + 1) % NUM_ELEMENTAL_TYPES
+        own_name = TYPE_NAMES[creature_type]
+        secondary_name = TYPE_NAMES[secondary_type]
     return [
-        Move(name="Basic Attack", power=40, accuracy=0.95, cooldown=0, move_type=TYPE_NORMAL),
+        Move(name="Basic Attack", power=40, accuracy=0.95, cooldown=0, move_type=TYPE_BLACKHOLE),
         Move(name=f"{own_name} Strike", power=70, accuracy=0.90, cooldown=1, move_type=creature_type),
         Move(name=f"{secondary_name} Coverage", power=55, accuracy=0.90, cooldown=1, move_type=secondary_type),
         Move(name=f"{own_name} Ultimate", power=100, accuracy=0.80, cooldown=2, move_type=creature_type),
@@ -101,6 +132,7 @@ def build_moveset(creature_type: int) -> list[Move]:
 @dataclass
 class Creature:
     creature_type: int
+    name: str = ""
     hp: int = MAX_HP
     moves: list[Move] = field(default_factory=list)
     cooldowns: list[int] = field(default_factory=lambda: [0] * NUM_MOVES)
@@ -113,8 +145,16 @@ class Creature:
         return self.hp <= 0
 
 
-def make_creature(creature_type: int) -> Creature:
-    return Creature(creature_type=creature_type, hp=MAX_HP, moves=build_moveset(creature_type))
+def make_creature(creature_type: int, rng: random.Random | None = None) -> Creature:
+    """Create a creature of the given power with a random alien name.
+
+    `rng` is optional so callers without a seeded `random.Random` (e.g. quick
+    scripts) can still call this; `CreatureBattleEnv` always passes its own
+    seeded instance through, so name assignment stays reproducible.
+    """
+    picker = rng if rng is not None else random
+    name = picker.choice(ALIEN_NAMES)
+    return Creature(creature_type=creature_type, name=name, hp=MAX_HP, moves=build_moveset(creature_type))
 
 
 def get_observation(actor: Creature, opponent: Creature) -> np.ndarray:
@@ -144,11 +184,11 @@ def resolve_turn(attacker: Creature, defender: Creature, action: int, rng: rando
     move = attacker.moves[action]
 
     if attacker.cooldowns[action] > 0:
-        return -0.5, f"{TYPE_NAMES[attacker.creature_type]} creature's {move.name} is on cooldown!"
+        return -0.5, f"{attacker.name}'s {move.name} is on cooldown!"
 
     if rng.random() > move.accuracy:
         attacker.cooldowns[action] = move.cooldown
-        return -0.5, f"{move.name} missed!"
+        return -0.5, f"{attacker.name}'s {move.name} missed!"
 
     multiplier = type_effectiveness(move.move_type, defender.creature_type)
     damage = move.power * multiplier * DAMAGE_SCALE
@@ -161,7 +201,7 @@ def resolve_turn(attacker: Creature, defender: Creature, action: int, rng: rando
     elif multiplier < 1.0:
         effectiveness_note = " It's not very effective..."
 
-    return damage / 100.0, f"{move.name} hit for {round(damage)} damage!{effectiveness_note}"
+    return damage / 100.0, f"{attacker.name}'s {move.name} hit for {round(damage)} damage!{effectiveness_note}"
 
 
 def choose_heuristic_action(actor: Creature, opponent: Creature, rng: random.Random) -> int:
@@ -203,8 +243,8 @@ class CreatureBattleEnv(gym.Env):
             self._rng.seed(seed)
         agent_type = self._rng.randrange(NUM_TYPES)
         opponent_type = self._rng.randrange(NUM_TYPES)
-        self.agent = make_creature(agent_type)
-        self.opponent = make_creature(opponent_type)
+        self.agent = make_creature(agent_type, self._rng)
+        self.opponent = make_creature(opponent_type, self._rng)
         self._turn_count = 0
         return get_observation(self.agent, self.opponent), {}
 
