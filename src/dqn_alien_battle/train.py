@@ -1,16 +1,20 @@
 """Train a DQN agent to play CreatureBattleEnv against its built-in heuristic opponent.
 
 Usage:
-    python train.py
+    alien-battle-train        # after `pip install dqn-alien-battle`
+    python -m dqn_alien_battle.train
 
-Produces `dqn_battle_agent.pth` containing the trained policy network's
-weights, which play_gui.py and app.py both load for inference.
+Produces `dqn_battle_agent.pth` **in the current working directory**,
+containing the trained policy network's weights. `play_gui.py`/`app.py`
+(and their `alien-battle-play`/`alien-battle-serve` entry points) prefer a
+local file like this one over the copy bundled with the installed package —
+see `_paths.default_model_path`.
 """
 
 from __future__ import annotations
 
-from battle_env import CreatureBattleEnv
-from model import DQNAgent
+from .battle_env import CreatureBattleEnv
+from .model import DQNAgent
 
 NUM_EPISODES = 2000
 EPSILON_START = 1.0

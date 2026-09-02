@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dqn-alien-battle"
+version = "0.1.0"
+description = "A Deep Q-Network learns to play a 1v1 turn-based alien battle game — train it, play it in Pygame, or serve it over FastAPI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "giannitheeaglesfan-beep" }]
+keywords = ["reinforcement-learning", "dqn", "deep-q-network", "pytorch", "gymnasium", "game"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Education",
+    "Topic :: Games/Entertainment :: Turn Based Strategy",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch",
+    "gymnasium",
+    "pygame-ce",
+    "numpy",
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+]
+
+[project.urls]
+Homepage = "https://github.com/giannitheeaglesfan-beep/DQN-Game"
+Repository = "https://github.com/giannitheeaglesfan-beep/DQN-Game"
+
+[project.scripts]
+alien-battle-train = "dqn_alien_battle.train:main"
+alien-battle-play = "dqn_alien_battle.play_gui:main"
+alien-battle-serve = "dqn_alien_battle.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dqn_alien_battle = ["dqn_battle_agent.pth"]

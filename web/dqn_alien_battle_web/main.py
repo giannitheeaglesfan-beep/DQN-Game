@@ -1,36 +1,47 @@
-"""Pygame GUI: play the trained DQN agent head-to-head as a human.
+"""pygbag entry point: play the trained DQN agent head-to-head as a human,
+compiled to WASM and run in the browser.
 
-Wraps `CreatureBattleEnv` directly and reuses its `resolve_turn` /
-`get_observation` helpers so the exact same damage / type-effectiveness /
-cooldown math used during training also governs human play. The only
-difference from `env.step()` is that the opponent's move is chosen by the
-trained DQN model instead of the environment's built-in heuristic AI.
+Ported from src/dqn_alien_battle/play_gui.py. Three changes from the desktop
+version, all forced by the browser/WASM runtime rather than a design choice:
+  1. No `torch` (no WASM build exists) and no `numpy` either (pygbag hangs
+     trying to dynamically install/compile it — reproduced during
+     development) — inference uses `pure_dqn.PureDQN`, a hand-rolled
+     pure-Python forward pass over the same trained weights, exported to
+     plain JSON by scripts/export_weights_for_web.py and verified numerically
+     equivalent to the real torch model by scripts/verify_pure_dqn.py.
+  2. No `gymnasium` (CreatureBattleEnv) — `battle_logic.py` is a copy of
+     battle_env.py's non-training parts; play_gui.py already only called the
+     free functions directly (resolve_turn, choose_heuristic_action), never
+     env.step()'s gym machinery, so this is a drop-in swap.
+  3. The blocking `while True: ... clock.tick(FPS)` loop becomes `async def
+     main()` with `await asyncio.sleep(0)` each frame — required so the
+     browser tab's own event loop keeps running (input, rendering, tab
+     responsiveness) instead of freezing solid, which is how pygbag/Pyodide
+     cooperatively schedules a "blocking" game loop in a single-threaded page.
 
-Usage:
-    python play_gui.py
-
-Requires `dqn_battle_agent.pth` to exist (run `python train.py` first).
+Build/run locally with pygbag (from the repo root):
+    pygbag web/dqn_alien_battle_web
+Static output for deployment lands in web/dqn_alien_battle_web/build/web/.
 """
 
 from __future__ import annotations
 
+import asyncio
 import random
-import sys
 
 import pygame
-import torch
 
-from battle_env import (
+from battle_logic import (
     NUM_MOVES,
     TYPE_NAMES,
-    CreatureBattleEnv,
     Creature,
     get_observation,
+    make_creature,
     resolve_turn,
 )
-from model import DQN
+from pure_dqn import PureDQN
 
-MODEL_PATH = "dqn_battle_agent.pth"
+MODEL_PATH = "dqn_battle_agent.json"
 
 WINDOW_WIDTH = 800
 WINDOW_HEIGHT = 600
@@ -73,14 +84,11 @@ class BattleGUI:
         self.font_medium = pygame.font.SysFont(None, 24)
         self.font_small = pygame.font.SysFont(None, 18)
 
-        self.env = CreatureBattleEnv()
         self.rng = random.Random()
+        self.model = PureDQN(MODEL_PATH)
 
-        self.device = torch.device("cpu")
-        self.model = DQN().to(self.device)
-        self.model.load_state_dict(torch.load(MODEL_PATH, map_location=self.device))
-        self.model.eval()
-
+        self.player: Creature
+        self.ai: Creature
         self.log_lines: list[str] = []
         self.game_over = False
         self.player_won = False
@@ -88,18 +96,13 @@ class BattleGUI:
         self._new_battle()
 
     def _new_battle(self) -> None:
-        self.env.reset()
+        agent_type = self.rng.randrange(len(TYPE_NAMES))
+        opponent_type = self.rng.randrange(len(TYPE_NAMES))
+        self.player = make_creature(agent_type, self.rng)
+        self.ai = make_creature(opponent_type, self.rng)
         self.log_lines = [f"{self.player.name} vs {self.ai.name} — a wild alien battle begins!"]
         self.game_over = False
         self.player_won = False
-
-    @property
-    def player(self) -> Creature:
-        return self.env.agent
-
-    @property
-    def ai(self) -> Creature:
-        return self.env.opponent
 
     def _log(self, message: str) -> None:
         self.log_lines.append(message)
@@ -109,10 +112,7 @@ class BattleGUI:
     def _ai_choose_action(self) -> int:
         """Predict the AI creature's move from its own perspective."""
         state = get_observation(self.ai, self.player)
-        with torch.no_grad():
-            state_t = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
-            q_values = self.model(state_t)
-            return int(torch.argmax(q_values, dim=1).item())
+        return self.model.best_action(state)
 
     def _decrement_cooldowns(self) -> None:
         for creature in (self.player, self.ai):
@@ -252,29 +252,36 @@ class BattleGUI:
         pygame.display.flip()
         return play_again_rect
 
-    def run(self) -> None:
-        while True:
-            mouse_pos = pygame.mouse.get_pos()
-            play_again_rect = self.draw(mouse_pos)
+    def handle_click(self, pos: tuple[int, int], play_again_rect: pygame.Rect | None) -> None:
+        if self.game_over:
+            if play_again_rect and play_again_rect.collidepoint(pos):
+                self._new_battle()
+            return
 
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    pygame.quit()
-                    sys.exit(0)
-
-                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    if self.game_over:
-                        if play_again_rect and play_again_rect.collidepoint(event.pos):
-                            self._new_battle()
-                        continue
-
-                    for i, rect in enumerate(self._move_button_rects()):
-                        if rect.collidepoint(event.pos) and self.player.cooldowns[i] == 0:
-                            self.handle_player_move(i)
-                            break
-
-            self.clock.tick(FPS)
+        for i, rect in enumerate(self._move_button_rects()):
+            if rect.collidepoint(pos) and self.player.cooldowns[i] == 0:
+                self.handle_player_move(i)
+                break
 
 
-if __name__ == "__main__":
-    BattleGUI().run()
+async def main() -> None:
+    gui = BattleGUI()
+    running = True
+
+    while running:
+        mouse_pos = pygame.mouse.get_pos()
+        play_again_rect = gui.draw(mouse_pos)
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                gui.handle_click(event.pos, play_again_rect)
+
+        gui.clock.tick(FPS)
+        await asyncio.sleep(0)  # yield to the browser's event loop every frame
+
+    pygame.quit()
+
+
+asyncio.run(main())

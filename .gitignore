@@ -2,3 +2,6 @@ __pycache__/
 notebooks/
 .venv/
 *.pyc
+dist/
+build/
+*.egg-info/
