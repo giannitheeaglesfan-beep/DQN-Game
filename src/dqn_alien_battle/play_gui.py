@@ -31,6 +31,7 @@ from .battle_env import (
     Creature,
     get_observation,
     resolve_turn,
+    type_effectiveness,
 )
 from .model import DQN
 
@@ -39,6 +40,7 @@ MODEL_PATH = default_model_path()
 WINDOW_WIDTH = 800
 WINDOW_HEIGHT = 600
 FPS = 30
+AI_THINK_INTERVAL_MS = 550  # how long each revealed thought-line stays on screen before the next appears
 
 # --- Dark-mode palette -------------------------------------------------
 COLOR_BG = (24, 24, 36)
@@ -63,7 +65,7 @@ TYPE_COLORS = {
     4: (90, 40, 130),    # Black Hole
 }
 
-MAX_LOG_LINES = 6
+MAX_LOG_LINES = 7  # tall enough to keep a whole turn cycle (your move + AI's full breakdown) on screen together
 
 
 class BattleGUI:
@@ -85,17 +87,31 @@ class BattleGUI:
         self.model.load_state_dict(torch.load(str(MODEL_PATH), map_location=self.device))
         self.model.eval()
 
-        self.log_lines: list[str] = []
+        self.log_lines: list[tuple[str, tuple[int, int, int]]] = []
         self.game_over = False
         self.player_won = False
+
+        # AI "thinking" reveal state: while ai_turn_pending is True, the AI's move has
+        # already been decided (pending_ai_action) but we're still revealing the
+        # reasoning behind it, one line at a time, before actually resolving the turn.
+        self.ai_turn_pending = False
+        self.pending_ai_lines: list[tuple[str, tuple[int, int, int]]] = []
+        self.pending_ai_index = 0
+        self.pending_ai_action: int | None = None
+        self.think_timer_ms = 0.0
 
         self._new_battle()
 
     def _new_battle(self) -> None:
         self.env.reset()
-        self.log_lines = [f"{self.player.name} vs {self.ai.name} — a wild alien battle begins!"]
+        self.log_lines = [(f"{self.player.name} vs {self.ai.name} — a wild alien battle begins!", COLOR_TEXT_DIM)]
         self.game_over = False
         self.player_won = False
+        self.ai_turn_pending = False
+        self.pending_ai_lines = []
+        self.pending_ai_index = 0
+        self.pending_ai_action = None
+        self.think_timer_ms = 0.0
 
     @property
     def player(self) -> Creature:
@@ -105,25 +121,85 @@ class BattleGUI:
     def ai(self) -> Creature:
         return self.env.opponent
 
-    def _log(self, message: str) -> None:
-        self.log_lines.append(message)
+    def _log(self, message: str, color: tuple[int, int, int] = COLOR_TEXT_DIM) -> None:
+        self.log_lines.append((message, color))
         if len(self.log_lines) > MAX_LOG_LINES:
             self.log_lines = self.log_lines[-MAX_LOG_LINES:]
 
-    def _ai_choose_action(self) -> int:
-        """Predict the AI creature's move from its own perspective."""
+    def _ai_breakdown(self) -> tuple[list[tuple[str, tuple[int, int, int]]], int]:
+        """Compute the AI's Q-value for every move and build a human-readable,
+        color-coded breakdown of its reasoning, ranked best to worst.
+
+        The #1 ranked move is always labeled "best" (green) and the #4 is
+        always labeled "worst" (red) — but the two middle moves are labeled
+        by how *actually* close their Q-value is to the best one, not just
+        their fixed rank position. If all four moves are genuinely close in
+        value, the middle two read "great"/"good" (green/yellow) rather than
+        being forced into "bad" just for ranking 2nd/3rd; if the field is
+        wide, a middling move can still land on "OK" or "bad" (yellow/red).
+        A move on cooldown is shown dimmed/neutral regardless of rank, since
+        its Q-value ranking doesn't matter if the move can't actually be used.
+
+        Mirrors exactly what the network is actually asked at play time: raw
+        argmax over all 4 Q-values, with no hard rule preventing it from
+        "choosing" a move that's on cooldown (the model is trained to avoid
+        that via the -0.5 penalty, but nothing stops it from being wrong) —
+        so the breakdown is honest about that possibility too.
+        """
         state = get_observation(self.ai, self.player)
         with torch.no_grad():
             state_t = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
-            q_values = self.model(state_t)
-            return int(torch.argmax(q_values, dim=1).item())
+            q_values = self.model(state_t).squeeze(0).tolist()
+
+        chosen = int(max(range(NUM_MOVES), key=lambda i: q_values[i]))
+        ranked = sorted(range(NUM_MOVES), key=lambda i: q_values[i], reverse=True)
+        q_best = q_values[ranked[0]]
+
+        lines: list[tuple[str, tuple[int, int, int]]] = []
+        for rank, i in enumerate(ranked):
+            move = self.ai.moves[i]
+            on_cooldown = self.ai.cooldowns[i] > 0
+            if on_cooldown:
+                label = f"unavailable, CD {self.ai.cooldowns[i]}"
+                color = COLOR_TEXT_DIM
+            elif rank == 0:
+                label, color = "best", COLOR_HP_GREEN
+            elif rank == len(ranked) - 1:
+                label, color = "worst", COLOR_HP_RED
+            else:
+                # Absolute gap from the best value, not gap relative to this
+                # turn's spread — so if all 4 moves are genuinely close (e.g.
+                # a 0.03 spread), the middle ones read "great", not punished
+                # into "bad" just for ranking 2nd/3rd. Thresholds are rough,
+                # calibrated to this model's typically-observed Q-value range.
+                gap = q_best - q_values[i]
+                if gap < 1.5:
+                    label, color = "great", COLOR_HP_GREEN
+                elif gap < 4.0:
+                    label, color = "good", COLOR_HP_YELLOW
+                elif gap < 8.0:
+                    label, color = "OK", COLOR_HP_YELLOW
+                else:
+                    label, color = "bad", COLOR_HP_RED
+            lines.append((f"  {move.name}: Q={q_values[i]:+.2f} ({label})", color))
+
+        best_move = self.ai.moves[chosen]
+        mult = type_effectiveness(best_move.move_type, self.player.creature_type)
+        if self.ai.cooldowns[chosen] > 0:
+            why = "highest predicted value — but it's on cooldown, turn wasted"
+        elif mult > 1:
+            why = "highest predicted value, and a type advantage"
+        else:
+            why = "highest predicted value"
+        lines.append((f"-> {self.ai.name} picks {best_move.name} ({why})", COLOR_TEXT))
+        return lines, chosen
 
     def _decrement_cooldowns(self) -> None:
         for creature in (self.player, self.ai):
             creature.cooldowns = [max(0, cd - 1) for cd in creature.cooldowns]
 
     def handle_player_move(self, action: int) -> None:
-        if self.game_over or self.player.cooldowns[action] > 0:
+        if self.game_over or self.ai_turn_pending or self.player.cooldowns[action] > 0:
             return
 
         _, log = resolve_turn(self.player, self.ai, action, self.rng)
@@ -135,9 +211,39 @@ class BattleGUI:
             self.player_won = True
             return
 
-        ai_action = self._ai_choose_action()
-        _, ai_log = resolve_turn(self.ai, self.player, ai_action, self.rng)
+        # Don't resolve the AI's turn yet — reveal its reasoning first, one
+        # line at a time (see update()); _finish_ai_turn() actually applies
+        # the move once the reveal finishes.
+        lines, action_ = self._ai_breakdown()
+        self.pending_ai_lines = lines
+        self.pending_ai_index = 0
+        self.pending_ai_action = action_
+        self.think_timer_ms = 0.0
+        self.ai_turn_pending = True
+
+    def update(self, dt_ms: float) -> None:
+        """Advance the AI "thinking" reveal, if one is in progress. Call once
+        per frame with the elapsed milliseconds since the last call."""
+        if not self.ai_turn_pending:
+            return
+
+        self.think_timer_ms += dt_ms
+        if self.think_timer_ms < AI_THINK_INTERVAL_MS:
+            return
+        self.think_timer_ms = 0.0
+
+        if self.pending_ai_index < len(self.pending_ai_lines):
+            text, color = self.pending_ai_lines[self.pending_ai_index]
+            self._log(text, color)
+            self.pending_ai_index += 1
+        else:
+            self._finish_ai_turn()
+
+    def _finish_ai_turn(self) -> None:
+        assert self.pending_ai_action is not None
+        _, ai_log = resolve_turn(self.ai, self.player, self.pending_ai_action, self.rng)
         self._log(ai_log)
+        self.ai_turn_pending = False
 
         if self.player.is_fainted():
             self._log("You lose!")
@@ -186,10 +292,10 @@ class BattleGUI:
         self.screen.blit(hp_text, (bar_x, bar_y + bar_h + 4))
 
     def _draw_log(self) -> None:
-        log_rect = pygame.Rect(20, 200, WINDOW_WIDTH - 40, 140)
+        log_rect = pygame.Rect(20, 200, WINDOW_WIDTH - 40, 160)
         pygame.draw.rect(self.screen, COLOR_LOG_BG, log_rect, border_radius=8)
-        for i, line in enumerate(self.log_lines):
-            surf = self.font_small.render(line, True, COLOR_TEXT_DIM)
+        for i, (line, color) in enumerate(self.log_lines):
+            surf = self.font_small.render(line, True, color)
             self.screen.blit(surf, (log_rect.x + 12, log_rect.y + 10 + i * 20))
 
     def _move_button_rects(self) -> list[pygame.Rect]:
@@ -206,8 +312,9 @@ class BattleGUI:
         for i, rect in enumerate(self._move_button_rects()):
             move = self.player.moves[i]
             on_cooldown = self.player.cooldowns[i] > 0
+            disabled = on_cooldown or self.ai_turn_pending
 
-            if on_cooldown:
+            if disabled:
                 color = COLOR_BUTTON_DISABLED
             elif rect.collidepoint(mouse_pos):
                 color = COLOR_BUTTON_HOVER
@@ -216,14 +323,19 @@ class BattleGUI:
 
             pygame.draw.rect(self.screen, color, rect, border_radius=8)
 
-            name_color = COLOR_TEXT_DIM if on_cooldown else COLOR_TEXT
+            name_color = COLOR_TEXT_DIM if disabled else COLOR_TEXT
             name_surf = self.font_small.render(move.name, True, name_color)
             self.screen.blit(name_surf, (rect.x + 10, rect.y + 8))
 
             type_surf = self.font_small.render(TYPE_NAMES[move.move_type], True, TYPE_COLORS[move.move_type])
             self.screen.blit(type_surf, (rect.x + 10, rect.y + 30))
 
-            status = f"CD: {self.player.cooldowns[i]}" if on_cooldown else "Ready"
+            if on_cooldown:
+                status = f"CD: {self.player.cooldowns[i]}"
+            elif self.ai_turn_pending:
+                status = "..."
+            else:
+                status = "Ready"
             status_surf = self.font_small.render(status, True, name_color)
             self.screen.blit(status_surf, (rect.x + 10, rect.y + 50))
 
@@ -272,12 +384,16 @@ class BattleGUI:
                             self._new_battle()
                         continue
 
+                    if self.ai_turn_pending:
+                        continue  # ignore clicks while the AI's reasoning is being revealed
+
                     for i, rect in enumerate(self._move_button_rects()):
                         if rect.collidepoint(event.pos) and self.player.cooldowns[i] == 0:
                             self.handle_player_move(i)
                             break
 
-            self.clock.tick(FPS)
+            dt_ms = self.clock.tick(FPS)
+            self.update(dt_ms)
 
 
 def main() -> None:
